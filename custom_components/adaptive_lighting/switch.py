@@ -850,6 +850,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
         self._name = data[CONF_NAME]
         self._interval: timedelta = data[CONF_INTERVAL]
+        # Store the original configured lights (may include light groups)
+        # so we can re-expand them dynamically to pick up group membership changes
+        self._configured_lights: list[str] = data[CONF_LIGHTS]
         self.lights: list[str] = data[CONF_LIGHTS]
 
         # backup data for use in change_switch_settings "configuration" CONF_USE_DEFAULTS
@@ -1027,7 +1030,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
     def _expand_light_groups(self, hass: HomeAssistant | None = None) -> None:
         hass = hass or self.hass
-        all_lights = _expand_light_groups(hass, self.lights)
+        # Always expand from the original configured lights to pick up
+        # any changes to light group membership since config creation
+        all_lights = _expand_light_groups(hass, self._configured_lights)
         self.manager.lights.update(all_lights)
         self.manager.set_auto_reset_manual_control_times(
             all_lights,

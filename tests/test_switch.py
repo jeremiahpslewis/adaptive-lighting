@@ -2746,3 +2746,111 @@ async def test_skipped_lights_context_not_from_arbitrary_switch(hass):
         f"but got {name_hash_in_context}. This indicates the context is still "
         f"being created from an arbitrary switch instead of the manager."
     )
+
+
+async def test_light_group_membership_changes(hass, cleanup):
+    """Test that changes to light group membership are picked up dynamically.
+
+    This tests the fix for the issue where adaptive lighting doesn't detect
+    changes to light groups after config creation.
+
+    The fix stores the original configured lights (which may include light groups)
+    and re-expands them dynamically when _expand_light_groups is called, ensuring
+    that any changes to light group membership are picked up.
+    """
+    # Create template lights and a light group
+    lights = await setup_lights(hass, with_group=True)
+    all_entity_ids = [light.entity_id for light in lights]
+
+    # Initially configure the switch with only the light group
+    _, switch = await setup_switch(
+        hass,
+        {
+            CONF_LIGHTS: ["light.light_group"],
+            CONF_INTERCEPT: False,
+        },
+    )
+    await hass.async_block_till_done()
+
+    # Verify the switch expanded the light group initially
+    assert "light.light_4" in switch.lights
+    assert "light.light_5" in switch.lights
+    assert "light.light_group" not in switch.lights  # Group itself is removed after expansion
+
+    # Verify that _configured_lights still contains the original configuration
+    assert switch._configured_lights == ["light.light_group"]
+
+    # Simulate modifying the light group by directly updating the state attributes
+    # In real scenarios, this would happen when users modify light groups via UI/YAML
+    group_state = hass.states.get("light.light_group")
+    new_attributes = dict(group_state.attributes)
+    # Add light_3 to the group (simulating a user adding a light to the group)
+    new_attributes["entity_id"] = ["light.light_4", "light.light_5", "light.light_3"]
+    hass.states.async_set("light.light_group", group_state.state, new_attributes)
+    await hass.async_block_till_done()
+
+    # Verify the group state was updated
+    updated_group_state = hass.states.get("light.light_group")
+    assert "light.light_3" in updated_group_state.attributes["entity_id"]
+
+    # Before the fix: _expand_light_groups would use self.lights which was already expanded
+    # and wouldn't pick up the new light_3 in the group.
+    # After the fix: _expand_light_groups uses self._configured_lights which still contains
+    # the light group reference, so it will re-expand and pick up the new member.
+
+    # Manually trigger re-expansion (this happens automatically during adaptation intervals)
+    switch._expand_light_groups()
+
+    # Verify that the new light is now included
+    assert "light.light_3" in switch.lights, (
+        "Light group membership change was not picked up. "
+        "Expected light.light_3 to be in switch.lights after re-expansion."
+    )
+    assert "light.light_4" in switch.lights
+    assert "light.light_5" in switch.lights
+
+    # Verify the configured lights are still the original configuration
+    assert switch._configured_lights == ["light.light_group"]
+
+
+async def test_configured_lights_preserved_after_turn_on(hass):
+    """Test that _configured_lights is preserved across switch on/off cycles.
+
+    This ensures that the original light configuration (which may include light groups)
+    is not lost when the switch is turned on/off.
+    """
+    lights = await setup_lights(hass, with_group=True)
+
+    # Configure with light group
+    _, switch = await setup_switch(
+        hass,
+        {
+            CONF_LIGHTS: ["light.light_group", "light.light_1"],
+            CONF_INTERCEPT: False,
+        },
+    )
+    await hass.async_block_till_done()
+
+    # Verify initial state
+    original_configured_lights = switch._configured_lights.copy()
+    assert "light.light_group" in original_configured_lights
+    assert "light.light_1" in original_configured_lights
+
+    # Turn switch off
+    await switch.async_turn_off()
+    await hass.async_block_till_done()
+
+    # Verify configured lights are preserved
+    assert switch._configured_lights == original_configured_lights
+
+    # Turn switch back on
+    await switch.async_turn_on()
+    await hass.async_block_till_done()
+
+    # Verify configured lights are still preserved
+    assert switch._configured_lights == original_configured_lights
+
+    # Verify expanded lights include the group members
+    assert "light.light_4" in switch.lights
+    assert "light.light_5" in switch.lights
+    assert "light.light_1" in switch.lights
